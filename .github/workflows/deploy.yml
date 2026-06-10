@@ -12,7 +12,7 @@ on:
 # Tune these to match your AWS setup.
 env:
   AWS_REGION: us-east-1
-  FUNCTION_NAME: price-updater
+  FUNCTION_NAME: pricing-updater
 
 permissions:
   contents: read
