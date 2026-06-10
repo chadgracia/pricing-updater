@@ -1,5 +1,5 @@
 """
-price-updater Lambda  (Function URL, "Market Price Updater" paste form)
+pricing-updater Lambda  (Function URL, "Market Price Updater" paste form)
 =======================================================================
 
 Serves a single URL:
@@ -99,17 +99,17 @@ def _decode_body(event):
         raw = base64.b64decode(raw).decode("utf-8", errors="replace")
     return urllib.parse.parse_qs(raw, keep_blank_values=True)
 
-def _has_change(rec, crm):
-    """True if this update actually changes a price (not just keeping prior)."""
-    def changed(action, prior):
-        if not isinstance(action, (int, float)):
-            return False
-        if prior is None:
-            return True
-        return abs(prior - action) >= 0.005
-    return (changed(rec["set_bid"], crm["prior_bid"])
-            or changed(rec["set_ask"], crm["prior_ask"])
-            or changed(rec.get("set_price"), crm.get("prior_price")))
+MOVER_THRESHOLD_PCT = 2.5
+
+def _max_move_pct(rec, crm):
+    """Largest absolute % move across bid and ask vs prior CRM values.
+    None when no % move is computable (side untouched, CLEAR, or no prior)."""
+    moves = []
+    for action, prior in ((rec["set_bid"], crm["prior_bid"]),
+                          (rec["set_ask"], crm["prior_ask"])):
+        if isinstance(action, (int, float)) and isinstance(prior, (int, float)) and prior > 0:
+            moves.append(abs(action - prior) / prior * 100.0)
+    return max(moves) if moves else None
 
 def html_response(status, body):
     return {
@@ -503,13 +503,17 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
               if dry_run else
               '<div class="banner live">LIVE — Pipeline records updated.</div>')
 
-    # Sort: changed-price rows first, then by bid count desc, then by name
+    # Sort: big bid/ask movers (>= MOVER_THRESHOLD_PCT %) first, largest move
+    # first. Hiive Price is deliberately ignored -- the composite drifts a few
+    # cents daily, which made the old changed-first sort useless.
     pairs = list(zip(updates, results))
-    pairs.sort(key=lambda p: (
-        0 if _has_change(p[0][0], p[0][1]) else 1,
-        -(p[0][0].get("bids", 0) or 0),
-        p[0][1]["name"].lower(),
-    ))
+    def _sort_key(p):
+        rec, crm = p[0][0], p[0][1]
+        pct = _max_move_pct(rec, crm)
+        if pct is not None and pct >= MOVER_THRESHOLD_PCT:
+            return (0, -pct, crm["name"].lower())
+        return (1, -(rec.get("bids", 0) or 0), crm["name"].lower())
+    pairs.sort(key=_sort_key)
 
     rows = []
     for (rec, crm, _lvl), (ok, err) in pairs:
