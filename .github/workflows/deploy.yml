@@ -1,0 +1,42 @@
+name: Deploy Lambda
+
+# Auto-deploy the pricing-updater Lambda whenever lambda_function.py lands on main.
+on:
+  push:
+    branches: [main]
+    paths:
+      - lambda_function.py
+      - .github/workflows/deploy.yml
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+env:
+  AWS_REGION: us-east-1
+  FUNCTION_NAME: pricing-updater
+
+permissions:
+  id-token: write   # required for OIDC role assumption
+  contents: read
+
+concurrency:
+  group: deploy-lambda
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package and deploy
+        run: |
+          # stdlib + boto3 only, so a flat zip of the handler is all we need.
+          zip -j function.zip lambda_function.py
+          aws lambda update-function-code \
+            --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://function.zip \
+            --publish

@@ -437,7 +437,11 @@ textarea { width: 100%; height: 480px; font: 12px/1.4 ui-monospace, "SF Mono", M
 button { background: #1a1a1a; color: white; border: 0; padding: 10px 24px;
          border-radius: 6px; cursor: pointer; font-size: 14px; margin-top: 8px; }
 button:hover { background: #333; }
-.stats { display: flex; gap: 12px; margin: 12px 0 20px; flex-wrap: wrap; }
+a.run-btn { display: inline-flex; align-items: center; background: #1a1a1a; color: white;
+            text-decoration: none; padding: 0 20px; border-radius: 6px; font-size: 14px;
+            font-weight: 600; white-space: nowrap; }
+a.run-btn:hover { background: #333; }
+.stats { display: flex; gap: 12px; margin: 12px 0 20px; flex-wrap: wrap; align-items: stretch; }
 .stat { background: #f5f5f5; padding: 8px 14px; border-radius: 6px; min-width: 100px; }
 .stat .n { font-size: 22px; font-weight: 700; display: block; }
 .stat .l { font-size: 12px; color: #666; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -581,6 +585,7 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
     <div class="stat"><span class="n">{fail_n}</span><span class="l">failed</span></div>
     <div class="stat"><span class="n">{len(unmatched)}</span><span class="l">unmatched</span></div>
     <div class="stat"><span class="n">{len(skipped_empty)}</span><span class="l">skipped</span></div>
+    <a class="run-btn" href="">Run another</a>
   </div>
 
   <h2>Updates</h2>
@@ -589,8 +594,6 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
   {skipped_block}
   {amb_block}
   {unm_block}
-
-  <a class="back" href="">← Run another</a>
 </body></html>"""
 
 def render_error(msg):
