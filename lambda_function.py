@@ -464,7 +464,7 @@ def render_form():
 <html><head><meta charset="utf-8"><title>Market Price Updater</title><style>{CSS}</style></head>
 <body>
   <h1>Market Price Updater</h1>
-  <p class="muted">First line must be your access code. Below that, paste a Hiive dashboard dump
+  <p class="muted">First line must be your access code. Below that, paste a data dump
      OR one-liners like <code>zipline bid $100</code> (not both in the same paste).</p>
   <form method="POST" action="">
     <textarea name="hiive_text" autofocus required></textarea>
