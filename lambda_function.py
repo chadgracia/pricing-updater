@@ -78,6 +78,14 @@ FIELD_HIIVE_BID_DATE = "custom_label_3997300"
 FIELD_HIIVE_PRICE      = "custom_label_3999575"
 FIELD_HIIVE_PRICE_DATE = "custom_label_3999576"
 
+# High Priority multi_select (company). This tool flags a company when Hiive shows
+# a hot book, and never touches a record a human has marked Hold.
+FIELD_HIGH_PRIORITY = "custom_label_4002734"
+HP_SPV            = 7190470   # "Source SPV Seller"
+HP_DIRECT         = 7190471   # "Source Direct Seller"
+HP_HOLD           = 7190472   # "Hold" — when present, this tool skips the record entirely
+HP_BIDS_THRESHOLD = 10        # Hiive bid count at/above which a company is flagged hot
+
 ISSUER_ORG_TYPE_IDS = {5103523, 6677589}  # Unicorn, Private Company
 MIN_UNMATCHED_BIDS = 3  # show unmatched only when Hiive shows real demand
 
@@ -383,6 +391,19 @@ def merge_by_crm(matches):
 
 # --- Pipeline writes -------------------------------------------------------
 
+def get_high_priority(jwt, company_id):
+    """Live read of a company's High Priority multi_select entry IDs. Returns a list."""
+    req = urllib.request.Request(
+        f"{PIPELINE_BASE}/companies/{company_id}.json",
+        method="GET",
+        headers={"Authorization": f"Bearer {jwt}"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read())
+    custom = data.get("custom_fields") or {}
+    return list(custom.get(FIELD_HIGH_PRIORITY) or [])
+
+
 def update_company(jwt, company_id, rec, date_str, dry_run):
     """
     Only write a side when set_bid/set_ask is an actual number.
@@ -399,10 +420,33 @@ def update_company(jwt, company_id, rec, date_str, dry_run):
     if isinstance(rec.get("set_price"), (int, float)):
         payload[FIELD_HIIVE_PRICE]      = rec["set_price"]
         payload[FIELD_HIIVE_PRICE_DATE] = date_str
+
+    flag_hot = (rec.get("bids", 0) or 0) >= HP_BIDS_THRESHOLD
+
+    # Nothing to write and nothing to flag -> no read needed.
+    if not payload and not flag_hot:
+        return True, "nothing to write"
+
+    # Read current High Priority live so we can honor Hold and merge the
+    # Source checkboxes without clobbering an existing selection.
+    try:
+        current_hp = get_high_priority(jwt, company_id)
+    except Exception as e:
+        return False, f"high-priority read failed: {type(e).__name__}: {e}"
+    if HP_HOLD in current_hp:
+        return True, "held — not touched"
+
+    status_note = None
+    if flag_hot:
+        merged_hp = sorted(set(current_hp) | {HP_SPV, HP_DIRECT})
+        if merged_hp != sorted(current_hp):
+            payload[FIELD_HIGH_PRIORITY] = merged_hp
+            status_note = "flagged SPV+Direct"
+
     if not payload:
         return True, "nothing to write"
     if dry_run:
-        return True, None
+        return True, status_note or "dry-run ok"
     body = json.dumps({"company": {"custom_fields": payload}}).encode("utf-8")
     req = urllib.request.Request(
         f"{PIPELINE_BASE}/companies/{company_id}.json",
@@ -526,7 +570,7 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
             f'<td class="num">{rec.get("bids", 0)}</td>'
             f'<td class="num">{crm["id"]}</td>'
             f'<td class="{"ok" if ok else "fail"}">'
-            f'{"ok" if ok else html.escape(err or "fail")}</td>'
+            f'{(html.escape(err) if err else "ok") if ok else html.escape(err or "fail")}</td>'
             "</tr>"
         )
     updates_table = (
