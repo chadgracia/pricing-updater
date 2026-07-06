@@ -653,6 +653,296 @@ def render_error(msg):
   <a class="back" href="">← Back</a>
 </body></html>"""
 
+# --- Pitchbook (investor-list) paste mode ----------------------------------
+# A third paste format: a markdown pipe table of investors/firms whose header
+# contains Name, Company, Investment. This phase parses + classifies rows,
+# matches firms against the full companies.json snapshot, and resolves the
+# security's holding entry ID live in both the person and company holding
+# fields. It performs NO writes and does not load people.json. The Hiive and
+# one-liner paths are untouched.
+
+FIELD_PERSON_HOLDING     = "custom_label_3740611"   # person HOLDING (write key)
+FIELD_COMPANY_HOLDING    = "custom_label_3746654"   # company HOLDING (write key)
+PERSON_HOLDING_LABEL_ID  = 3740611                  # numeric id for /admin labels lookup
+COMPANY_HOLDING_LABEL_ID = 3746654
+
+PITCHBOOK_BLANKS = {"", "-", "—", "–", "n/a", "na", "none"}
+
+LEGAL_SUFFIX_RE = re.compile(
+    r"[,\s]+(inc|incorporated|corp|corporation|co|llc|l\.l\.c|ltd|limited|"
+    r"lp|l\.p|llp|plc|sa|s\.a|sas|s\.a\.s|gmbh|ag|nv|bv|pte|pty)\.?\s*$",
+    re.IGNORECASE)
+
+
+def strip_legal_suffix(name):
+    prev, out = None, (name or "").strip()
+    while out != prev:
+        prev = out
+        out = LEGAL_SUFFIX_RE.sub("", out).strip().rstrip(",").strip()
+    return out
+
+
+def _norm_security(name):
+    """Normalize a security/entry name: drop trailing $/# marker + whitespace."""
+    n = re.sub(r"[\s$#]+$", "", (name or "").strip())
+    return n.strip().lower()
+
+
+def is_pitchbook_table(text):
+    for ln in text.splitlines():
+        if ln.count("|") >= 3:
+            low = ln.lower()
+            if "name" in low and "company" in low and "investment" in low:
+                return True
+    return False
+
+
+def _pb_clean(cell):
+    c = (cell or "").strip()
+    return "" if c.lower() in PITCHBOOK_BLANKS else c
+
+
+def parse_pitchbook_table(text):
+    """Return (rows, security_raw). Rows carry name/title/company/email/kind."""
+    lines = [ln for ln in text.splitlines() if ln.count("|") >= 2]
+    header_idx = None
+    for i, ln in enumerate(lines):
+        low = ln.lower()
+        if "name" in low and "company" in low and "investment" in low:
+            header_idx = i
+            break
+    if header_idx is None:
+        return [], ""
+
+    def cells(ln):
+        parts = [p.strip() for p in ln.split("|")]
+        if parts and parts[0] == "":
+            parts = parts[1:]
+        if parts and parts[-1] == "":
+            parts = parts[:-1]
+        return parts
+
+    header = [h.lower() for h in cells(lines[header_idx])]
+    col = {k: (header.index(k) if k in header else None)
+           for k in ("name", "title", "company", "investment", "email")}
+
+    rows, security_raw = [], ""
+    for ln in lines[header_idx + 1:]:
+        c = cells(ln)
+        if c and all(set(x) <= set("-: ") for x in c):
+            continue  # markdown separator row
+        def get(k):
+            j = col[k]
+            return _pb_clean(c[j]) if (j is not None and j < len(c)) else ""
+        name, title, company, investment, email = (
+            get("name"), get("title"), get("company"), get("investment"), get("email"))
+        if investment and not security_raw:
+            security_raw = investment
+        if not name and not company:
+            continue
+        if not name and company:
+            kind = "firm_only"
+        elif name and (not company or company.lower() == "self"
+                       or company.lower() == name.lower()):
+            kind = "angel"
+        else:
+            kind = "named"
+        rows.append({"name": name, "title": title, "company": company,
+                     "email": email, "kind": kind})
+    return rows, security_raw
+
+
+def _fetch_label_entries(jwt, endpoint, label_id):
+    """GET a Pipeline custom-field labels endpoint and return {norm_name: entry_id}
+    for the given label_id. Tolerant of both nested-under-label and flat-entry shapes."""
+    req = urllib.request.Request(
+        f"{PIPELINE_BASE}{endpoint}",
+        method="GET",
+        headers={"Authorization": f"Bearer {jwt}"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = json.loads(r.read())
+    if isinstance(body, dict):
+        items = (body.get("custom_field_labels") or body.get("entries")
+                 or body.get("data") or [])
+    elif isinstance(body, list):
+        items = body
+    else:
+        items = []
+    out = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        # Case A: label object with nested dropdown entries.
+        if it.get("id") == label_id and "custom_field_label_dropdown_entries" in it:
+            for e in it.get("custom_field_label_dropdown_entries") or []:
+                if isinstance(e, dict) and e.get("name") and e.get("id"):
+                    out[_norm_security(e["name"])] = int(e["id"])
+        # Case B: item is itself a dropdown entry carrying its parent label id.
+        elif it.get("custom_field_label_id") == label_id and it.get("name") and it.get("id"):
+            out[_norm_security(it["name"])] = int(it["id"])
+    return out
+
+
+def resolve_security_holdings(jwt, security):
+    """Return (person_entry_id|None, company_entry_id|None) for a security name."""
+    key = _norm_security(security)
+    person_entries = _fetch_label_entries(
+        jwt, "/admin/custom_field_labels.json?conditions[entity_type]=person",
+        PERSON_HOLDING_LABEL_ID)
+    company_entries = _fetch_label_entries(
+        jwt, "/admin/company_custom_field_labels.json?per_page=200",
+        COMPANY_HOLDING_LABEL_ID)
+    return person_entries.get(key), company_entries.get(key)
+
+
+def load_all_companies(s3):
+    """All companies from companies.json (no issuer/org filter). Returns [{id,name}]."""
+    obj = s3.get_object(Bucket=BUCKET, Key="companies.json")
+    snap = json.loads(obj["Body"].read())
+    return [{"id": c["id"], "name": c["name"]}
+            for c in snap.get("companies", []) if c.get("name")]
+
+
+def plan_pitchbook_firms(rows, companies_idx):
+    """Match each distinct firm (from named + firm_only rows) to companies.json."""
+    firms = {}
+    for r in rows:
+        if r["kind"] == "angel":
+            continue
+        fname = r["company"].strip()
+        if fname:
+            firms.setdefault(fname.lower(), fname)
+    firm_recs = [{"name": n} for n in firms.values()]
+    matches, unmatched, ambiguous = match_recs_to_crm(firm_recs, companies_idx)
+    matched   = [(h["name"], co["name"], co["id"]) for h, co, _lvl in matches]
+    to_create = [h["name"] for h in unmatched]
+    ambig     = [(h["name"], [c["name"] for c in cands]) for h, cands, _lvl in ambiguous]
+    return matched, to_create, ambig
+
+
+def render_pitchbook(security_raw, security, person_hid, company_hid,
+                     named, angels, firmonly, matched, to_create, ambig):
+    def esc(x):
+        return html.escape(str(x if x is not None else ""))
+
+    def rows_table(items):
+        if not items:
+            return "<p class='muted'>none</p>"
+        trs = "".join(
+            "<tr>"
+            f"<td>{esc(r['name'])}</td>"
+            f"<td>{esc(r['title'])}</td>"
+            f"<td>{esc(r['company'])}</td>"
+            f"<td class='muted'>{esc(r['email'])}</td>"
+            "</tr>" for r in items)
+        return ("<table><thead><tr><th>Name</th><th>Title</th>"
+                "<th>Company</th><th>Email</th></tr></thead><tbody>"
+                + trs + "</tbody></table>")
+
+    matched_block = ("<p class='muted'>none</p>" if not matched else
+        "<table><thead><tr><th>Firm (paste)</th><th>Matched CRM company</th>"
+        "<th>CRM id</th></tr></thead><tbody>"
+        + "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td>"
+                  f"<td class='muted'>{esc(cid)}</td></tr>"
+                  for a, b, cid in matched) + "</tbody></table>")
+
+    create_block = ("<p class='muted'>none</p>" if not to_create else
+        "<ul>" + "".join(f"<li>{esc(n)}</li>" for n in to_create) + "</ul>")
+
+    ambig_block = "" if not ambig else (
+        "<h2>Ambiguous firm matches (review)</h2><ul>"
+        + "".join(f"<li><b>{esc(a)}</b> → {esc(', '.join(cs))}</li>"
+                  for a, cs in ambig) + "</ul>")
+
+    p_line = (f"<span class='ok'>{person_hid}</span>" if person_hid
+              else "<span class='fail'>NOT FOUND — person HOLDING will be skipped</span>")
+    c_line = (f"<span class='ok'>{company_hid}</span>" if company_hid
+              else "<span class='fail'>NOT FOUND — company HOLDING will be skipped</span>")
+
+    total = len(named) + len(angels) + len(firmonly)
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Market Price Updater · Pitchbook</title><style>{CSS}</style></head>
+<body>
+  <h1>Pitchbook Import — Preview</h1>
+  <div class="banner dry">PARSE + RESOLVE ONLY — no records created, no writes. Live reads were used only to resolve holding IDs.</div>
+  <div class="stats">
+    <div class="stat"><span class="n">{total}</span><span class="l">rows</span></div>
+    <div class="stat"><span class="n">{len(named)}</span><span class="l">named</span></div>
+    <div class="stat"><span class="n">{len(angels)}</span><span class="l">angels</span></div>
+    <div class="stat"><span class="n">{len(firmonly)}</span><span class="l">firm-only</span></div>
+    <div class="stat"><span class="n">{len(matched)}</span><span class="l">firms matched</span></div>
+    <div class="stat"><span class="n">{len(to_create)}</span><span class="l">firms to create</span></div>
+    <a class="run-btn" href="">Run another</a>
+  </div>
+
+  <h2>Security</h2>
+  <p>Investment column: <code>{esc(security_raw)}</code> → match name <code>{esc(security)}</code></p>
+  <p>person HOLDING (custom_label_3740611): {p_line}</p>
+  <p>company HOLDING (custom_label_3746654): {c_line}</p>
+
+  <h2>Named contacts</h2>
+  {rows_table(named)}
+  <h2>Angels</h2>
+  {rows_table(angels)}
+  <h2>Firm-only rows</h2>
+  {rows_table(firmonly)}
+
+  <h2>Firms matched to existing CRM companies</h2>
+  {matched_block}
+  <h2>Firms that would be created</h2>
+  {create_block}
+  {ambig_block}
+</body></html>"""
+
+
+def run_pitchbook(s3, text, dry_run):
+    rows, security_raw = parse_pitchbook_table(text)
+    if not rows:
+        return render_error("Detected a pitchbook table but parsed no usable rows.")
+    security = strip_legal_suffix(security_raw)
+
+    jwt = get_jwt(s3)
+    try:
+        person_hid, company_hid = resolve_security_holdings(jwt, security)
+    except Exception as e:
+        return render_error(f"Holding resolution failed: {type(e).__name__}: {e}")
+
+    all_companies = load_all_companies(s3)
+    idx = build_match_index(all_companies)
+    matched, to_create, ambig = plan_pitchbook_firms(rows, idx)
+
+    named    = [r for r in rows if r["kind"] == "named"]
+    angels   = [r for r in rows if r["kind"] == "angel"]
+    firmonly = [r for r in rows if r["kind"] == "firm_only"]
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    run_log = {
+        "ts":              datetime.now(timezone.utc).isoformat(),
+        "dry_run":         dry_run,
+        "security_raw":    security_raw,
+        "security":        security,
+        "person_holding_id":  person_hid,
+        "company_holding_id": company_hid,
+        "rows":            len(rows),
+        "named":           len(named),
+        "angels":          len(angels),
+        "firm_only":       len(firmonly),
+        "firms_matched":   matched,
+        "firms_to_create": to_create,
+        "firms_ambiguous": ambig,
+    }
+    try:
+        s3.put_object(Bucket=BUCKET, Key=f"pitchbook-output/{ts}.json",
+                      ContentType="application/json",
+                      Body=json.dumps(run_log, indent=2, default=str).encode("utf-8"))
+    except Exception as e:
+        logger.warning(f"Couldn't write pitchbook run log: {e}")
+
+    return render_pitchbook(security_raw, security, person_hid, company_hid,
+                            named, angels, firmonly, matched, to_create, ambig)
+
+
 # --- Entry point -----------------------------------------------------------
 
 def lambda_handler(event, context):
@@ -681,6 +971,8 @@ def lambda_handler(event, context):
         if is_hiive_mode:
             hiive_recs    = parse_hiive_blocks(text)
             oneliner_recs = []
+        elif is_pitchbook_table(text):
+            return html_response(200, run_pitchbook(s3, text, DRY_RUN))
         else:
             hiive_recs    = []
             oneliner_recs = parse_one_liners(text)
