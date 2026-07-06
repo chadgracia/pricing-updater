@@ -860,7 +860,7 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
         trs = "".join(
             "<tr>"
             f"<td>{esc(r['name'])}</td>"
-            f"<td>{esc(r['title'])}</td>"
+            f"<td>{esc(r['title'] or ('Angel Investor' if r.get('kind') == 'angel' else ''))}</td>"
             f"<td>{esc(r['company'])}</td>"
             f"<td class='muted'>{esc(r['email'])}</td>"
             "</tr>" for r in items)
@@ -868,17 +868,17 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
                 "<th>Company</th><th>Email</th></tr></thead><tbody>"
                 + trs + "</tbody></table>")
 
-    matched_block = ("<p class='muted'>none</p>" if not matched else
-        "<table><thead><tr><th>Firm (paste)</th><th>Matched CRM company</th>"
-        "<th>CRM id</th></tr></thead><tbody>"
-        + "".join(f"<tr><td>{esc(a)}</td><td>{esc(b)}</td>"
-                  f"<td class='muted'>{esc(cid)}</td></tr>"
-                  for a, b, cid in matched) + "</tbody></table>")
-
-    manual_block = ("<p class='muted'>none</p>" if not manual else
-        "<p class='muted'>These are NOT created. Copy the list and handle them manually.</p>"
-        f"<textarea readonly rows='{min(max(len(manual), 3), 30)}' style='height:auto'>"
-        + html.escape("\n".join(manual)) + "</textarea>")
+    # A lead is updatable if it's an angel (natural person, handled directly) or
+    # its firm cleanly matched a CRM company. New + ambiguous firms go to Check.
+    # Only the Update list would be written to the CRM.
+    matched_names = {a.strip().lower() for a, _b, _cid in matched}
+    all_rows = named + firmonly + angels
+    update_rows = [r for r in all_rows
+                   if r["kind"] == "angel"
+                   or r["company"].strip().lower() in matched_names]
+    check_rows  = [r for r in all_rows
+                   if r["kind"] != "angel"
+                   and r["company"].strip().lower() not in matched_names]
 
     p_line = (f"<span class='ok'>{person_hid}</span>" if person_hid
               else "<span class='fail'>NOT FOUND — person HOLDING will be skipped</span>")
@@ -896,11 +896,8 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
   <div class="banner dry">PARSE + RESOLVE ONLY — no records created, no writes. Live reads were used only to resolve holding IDs.</div>
   <div class="stats">
     <div class="stat"><span class="n">{total}</span><span class="l">rows</span></div>
-    <div class="stat"><span class="n">{len(named)}</span><span class="l">named</span></div>
-    <div class="stat"><span class="n">{len(angels)}</span><span class="l">angels</span></div>
-    <div class="stat"><span class="n">{len(firmonly)}</span><span class="l">firm-only</span></div>
-    <div class="stat"><span class="n">{len(matched)}</span><span class="l">firms matched</span></div>
-    <div class="stat"><span class="n">{len(manual)}</span><span class="l">firms to handle</span></div>
+    <div class="stat"><span class="n">{len(update_rows)}</span><span class="l">leads to update</span></div>
+    <div class="stat"><span class="n">{len(check_rows)}</span><span class="l">leads to check</span></div>
     <a class="run-btn" href="">Run another</a>
   </div>
 
@@ -910,17 +907,13 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
   <p>person HOLDING (custom_label_3740611): {p_line}</p>
   <p>company HOLDING (custom_label_3746654): {c_line}</p>
 
-  <h2>Named contacts</h2>
-  {rows_table(named)}
-  <h2>Angels</h2>
-  {rows_table(angels)}
-  <h2>Firm-only rows</h2>
-  {rows_table(firmonly)}
+  <h2>Leads to Update ({len(update_rows)})</h2>
+  <p class="muted">These would be updated in the CRM.</p>
+  {rows_table(update_rows)}
 
-  <h2>Firms matched to existing CRM companies</h2>
-  {matched_block}
-  <h2>Firms to handle manually (not created)</h2>
-  {manual_block}
+  <h2>Leads to Check ({len(check_rows)})</h2>
+  <p class="muted">New or ambiguous; review and handle manually.</p>
+  {rows_table(check_rows)}
 </body></html>"""
 
 
