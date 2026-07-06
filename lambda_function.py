@@ -839,15 +839,18 @@ def plan_pitchbook_firms(rows, companies_idx):
             firms.setdefault(fname.lower(), fname)
     firm_recs = [{"name": n} for n in firms.values()]
     matches, unmatched, ambiguous = match_recs_to_crm(firm_recs, companies_idx)
-    matched   = [(h["name"], co["name"], co["id"]) for h, co, _lvl in matches]
-    to_create = [h["name"] for h in unmatched]
-    ambig     = [(h["name"], [c["name"] for c in cands]) for h, cands, _lvl in ambiguous]
-    return matched, to_create, ambig
+    ambig_names = {h["name"].strip().lower() for h, _c, _l in ambiguous}
+    # Clean, unambiguous matches only. Ambiguous auto-picks are NOT trusted —
+    # they go to the manual list with the unmatched firms. Nothing is created.
+    matched = [(h["name"], co["name"], co["id"]) for h, co, _lvl in matches
+               if h["name"].strip().lower() not in ambig_names]
+    manual = [h["name"] for h in unmatched] + [h["name"] for h, _c, _l in ambiguous]
+    return matched, manual
 
 
 def render_pitchbook(security_raw, security, person_hid, company_hid,
                      sec_company_id, sec_company_name,
-                     named, angels, firmonly, matched, to_create, ambig):
+                     named, angels, firmonly, matched, manual):
     def esc(x):
         return html.escape(str(x if x is not None else ""))
 
@@ -872,13 +875,10 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
                   f"<td class='muted'>{esc(cid)}</td></tr>"
                   for a, b, cid in matched) + "</tbody></table>")
 
-    create_block = ("<p class='muted'>none</p>" if not to_create else
-        "<ul>" + "".join(f"<li>{esc(n)}</li>" for n in to_create) + "</ul>")
-
-    ambig_block = "" if not ambig else (
-        "<h2>Ambiguous firm matches (review)</h2><ul>"
-        + "".join(f"<li><b>{esc(a)}</b> → {esc(', '.join(cs))}</li>"
-                  for a, cs in ambig) + "</ul>")
+    manual_block = ("<p class='muted'>none</p>" if not manual else
+        "<p class='muted'>These are NOT created. Copy the list and handle them manually.</p>"
+        f"<textarea readonly rows='{min(max(len(manual), 3), 30)}' style='height:auto'>"
+        + html.escape("\n".join(manual)) + "</textarea>")
 
     p_line = (f"<span class='ok'>{person_hid}</span>" if person_hid
               else "<span class='fail'>NOT FOUND — person HOLDING will be skipped</span>")
@@ -900,7 +900,7 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
     <div class="stat"><span class="n">{len(angels)}</span><span class="l">angels</span></div>
     <div class="stat"><span class="n">{len(firmonly)}</span><span class="l">firm-only</span></div>
     <div class="stat"><span class="n">{len(matched)}</span><span class="l">firms matched</span></div>
-    <div class="stat"><span class="n">{len(to_create)}</span><span class="l">firms to create</span></div>
+    <div class="stat"><span class="n">{len(manual)}</span><span class="l">firms to handle</span></div>
     <a class="run-btn" href="">Run another</a>
   </div>
 
@@ -919,9 +919,8 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
 
   <h2>Firms matched to existing CRM companies</h2>
   {matched_block}
-  <h2>Firms that would be created</h2>
-  {create_block}
-  {ambig_block}
+  <h2>Firms to handle manually (not created)</h2>
+  {manual_block}
 </body></html>"""
 
 
@@ -939,7 +938,7 @@ def run_pitchbook(s3, text, dry_run):
 
     all_companies = load_all_companies(s3)
     idx = build_match_index(all_companies)
-    matched, to_create, ambig = plan_pitchbook_firms(rows, idx)
+    matched, manual = plan_pitchbook_firms(rows, idx)
 
     # Cross-check: resolve the security itself to its CRM company record so the
     # preview confirms the holding entry maps to the real traded-issuer record.
@@ -968,9 +967,8 @@ def run_pitchbook(s3, text, dry_run):
         "named":           len(named),
         "angels":          len(angels),
         "firm_only":       len(firmonly),
-        "firms_matched":   matched,
-        "firms_to_create": to_create,
-        "firms_ambiguous": ambig,
+        "firms_matched": matched,
+        "firms_manual":  manual,
     }
     try:
         s3.put_object(Bucket=BUCKET, Key=f"pitchbook-output/{ts}.json",
@@ -981,7 +979,7 @@ def run_pitchbook(s3, text, dry_run):
 
     return render_pitchbook(security_raw, security, person_hid, company_hid,
                             sec_company_id, sec_company_name,
-                            named, angels, firmonly, matched, to_create, ambig)
+                            named, angels, firmonly, matched, manual)
 
 
 # --- Entry point -----------------------------------------------------------
