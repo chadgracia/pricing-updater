@@ -707,7 +707,7 @@ def lambda_handler(event, context):
                     f"unmatched={len(unmatched)} skipped={len(skipped_empty)}")
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        jwt = get_jwt(s3) if not DRY_RUN else None
+        jwt = get_jwt(s3)
         results = []
         for rec, crm_co, _lvl in updates:
             ok, err = update_company(jwt, crm_co["id"], rec, today, DRY_RUN)
