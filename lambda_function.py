@@ -770,6 +770,11 @@ def _fetch_label_entries(jwt, endpoint, label_id):
     else:
         items = []
     out = {}
+    def _add(nm, eid):
+        out[_norm_security(nm)] = int(eid)
+        ps = _norm_security(_strip_paren(nm))
+        if ps:
+            out.setdefault(ps, int(eid))
     for it in items:
         if not isinstance(it, dict):
             continue
@@ -777,23 +782,39 @@ def _fetch_label_entries(jwt, endpoint, label_id):
         if it.get("id") == label_id and "custom_field_label_dropdown_entries" in it:
             for e in it.get("custom_field_label_dropdown_entries") or []:
                 if isinstance(e, dict) and e.get("name") and e.get("id"):
-                    out[_norm_security(e["name"])] = int(e["id"])
+                    _add(e["name"], e["id"])
         # Case B: item is itself a dropdown entry carrying its parent label id.
         elif it.get("custom_field_label_id") == label_id and it.get("name") and it.get("id"):
-            out[_norm_security(it["name"])] = int(it["id"])
+            _add(it["name"], it["id"])
     return out
 
 
+def _strip_paren(s):
+    return re.sub(r"\s*\([^)]*\)", "", s or "").strip()
+
+
 def resolve_security_holdings(jwt, security):
-    """Return (person_entry_id|None, company_entry_id|None) for a security name."""
-    key = _norm_security(security)
+    """Return (person_entry_id|None, company_entry_id|None) for a security name.
+    Matches on both the full name and the parenthetical-stripped name, so
+    'Physical Intelligence (Pi)' resolves against a 'Physical Intelligence' entry
+    and vice versa."""
+    cands = []
+    for form in (security, _strip_paren(security)):
+        k = _norm_security(form)
+        if k and k not in cands:
+            cands.append(k)
     person_entries = _fetch_label_entries(
         jwt, "/admin/custom_field_labels.json?conditions[entity_type]=person",
         PERSON_HOLDING_LABEL_ID)
     company_entries = _fetch_label_entries(
         jwt, "/admin/company_custom_field_labels.json?per_page=200",
         COMPANY_HOLDING_LABEL_ID)
-    return person_entries.get(key), company_entries.get(key)
+    def pick(entries):
+        for k in cands:
+            if k in entries:
+                return entries[k]
+        return None
+    return pick(person_entries), pick(company_entries)
 
 
 def load_all_companies(s3):
@@ -805,13 +826,16 @@ def load_all_companies(s3):
 
 
 def plan_pitchbook_firms(rows, companies_idx):
-    """Match each distinct firm (from named + firm_only rows) to companies.json."""
+    """Match each distinct firm (from named + firm_only rows) to companies.json.
+    A firm-only row whose Company equals an angel's own name (an un-deduped
+    self-investor, e.g. 'Jeffrey Bezos') is dropped — it's the angel, not a firm."""
+    angel_names = {r["name"].strip().lower() for r in rows if r["kind"] == "angel"}
     firms = {}
     for r in rows:
         if r["kind"] == "angel":
             continue
         fname = r["company"].strip()
-        if fname:
+        if fname and fname.lower() not in angel_names:
             firms.setdefault(fname.lower(), fname)
     firm_recs = [{"name": n} for n in firms.values()]
     matches, unmatched, ambiguous = match_recs_to_crm(firm_recs, companies_idx)
