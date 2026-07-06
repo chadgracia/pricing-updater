@@ -846,6 +846,7 @@ def plan_pitchbook_firms(rows, companies_idx):
 
 
 def render_pitchbook(security_raw, security, person_hid, company_hid,
+                     sec_company_id, sec_company_name,
                      named, angels, firmonly, matched, to_create, ambig):
     def esc(x):
         return html.escape(str(x if x is not None else ""))
@@ -883,6 +884,9 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
               else "<span class='fail'>NOT FOUND — person HOLDING will be skipped</span>")
     c_line = (f"<span class='ok'>{company_hid}</span>" if company_hid
               else "<span class='fail'>NOT FOUND — company HOLDING will be skipped</span>")
+    s_line = (f"<span class='ok'>{esc(sec_company_name)} (id {esc(sec_company_id)})</span>"
+              if sec_company_id
+              else "<span class='fail'>not found in companies.json — check the security name</span>")
 
     total = len(named) + len(angels) + len(firmonly)
     return f"""<!doctype html>
@@ -902,6 +906,7 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
 
   <h2>Security</h2>
   <p>Investment column: <code>{esc(security_raw)}</code> → match name <code>{esc(security)}</code></p>
+  <p>Security CRM company record: {s_line}</p>
   <p>person HOLDING (custom_label_3740611): {p_line}</p>
   <p>company HOLDING (custom_label_3746654): {c_line}</p>
 
@@ -936,6 +941,15 @@ def run_pitchbook(s3, text, dry_run):
     idx = build_match_index(all_companies)
     matched, to_create, ambig = plan_pitchbook_firms(rows, idx)
 
+    # Cross-check: resolve the security itself to its CRM company record so the
+    # preview confirms the holding entry maps to the real traded-issuer record.
+    sec_matches, _su, _sa = match_recs_to_crm([{"name": security}], idx)
+    if sec_matches:
+        sec_co = sec_matches[0][1]
+        sec_company_id, sec_company_name = sec_co["id"], sec_co["name"]
+    else:
+        sec_company_id, sec_company_name = None, None
+
     named    = [r for r in rows if r["kind"] == "named"]
     angels   = [r for r in rows if r["kind"] == "angel"]
     firmonly = [r for r in rows if r["kind"] == "firm_only"]
@@ -948,6 +962,8 @@ def run_pitchbook(s3, text, dry_run):
         "security":        security,
         "person_holding_id":  person_hid,
         "company_holding_id": company_hid,
+        "security_company_id":   sec_company_id,
+        "security_company_name": sec_company_name,
         "rows":            len(rows),
         "named":           len(named),
         "angels":          len(angels),
@@ -964,6 +980,7 @@ def run_pitchbook(s3, text, dry_run):
         logger.warning(f"Couldn't write pitchbook run log: {e}")
 
     return render_pitchbook(security_raw, security, person_hid, company_hid,
+                            sec_company_id, sec_company_name,
                             named, angels, firmonly, matched, to_create, ambig)
 
 
