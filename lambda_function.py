@@ -850,7 +850,7 @@ def plan_pitchbook_firms(rows, companies_idx):
 
 def render_pitchbook(security_raw, security, person_hid, company_hid,
                      sec_company_id, sec_company_name,
-                     named, angels, firmonly, matched, manual):
+                     named, angels, firmonly, matched, manual, update_targets):
     def esc(x):
         return html.escape(str(x if x is not None else ""))
 
@@ -867,6 +867,18 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
         return ("<table><thead><tr><th>Name</th><th>Title</th>"
                 "<th>Company</th><th>Email</th></tr></thead><tbody>"
                 + trs + "</tbody></table>")
+
+    def targets_table(items):
+        if not items:
+            return "<p class='muted'>none</p>"
+        trs = "".join(
+            "<tr>"
+            f"<td>{esc(t['name'])}</td>"
+            f"<td>{esc(t['company'])}</td>"
+            f"<td class='muted'>{esc(t['status'])}</td>"
+            "</tr>" for t in items)
+        return ("<table><thead><tr><th>Person</th><th>Company</th>"
+                "<th>Status</th></tr></thead><tbody>" + trs + "</tbody></table>")
 
     # A lead is updatable if it's an angel (natural person, handled directly) or
     # its firm cleanly matched a CRM company. New + ambiguous firms go to Check.
@@ -893,10 +905,10 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
 <html><head><meta charset="utf-8"><title>Market Price Updater · Pitchbook</title><style>{CSS}</style></head>
 <body>
   <h1>Pitchbook Import — Preview</h1>
-  <div class="banner dry">PARSE + RESOLVE ONLY — no records created, no writes. Live reads were used only to resolve holding IDs.</div>
+  <div class="banner dry">PREVIEW — no writes. Lists every CRM person at each matched company who would get the holding merged in.</div>
   <div class="stats">
     <div class="stat"><span class="n">{total}</span><span class="l">rows</span></div>
-    <div class="stat"><span class="n">{len(update_rows)}</span><span class="l">leads to update</span></div>
+    <div class="stat"><span class="n">{len(update_targets)}</span><span class="l">leads to update</span></div>
     <div class="stat"><span class="n">{len(check_rows)}</span><span class="l">leads to check</span></div>
     <a class="run-btn" href="">Run another</a>
   </div>
@@ -907,14 +919,45 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
   <p>person HOLDING (custom_label_3740611): {p_line}</p>
   <p>company HOLDING (custom_label_3746654): {c_line}</p>
 
-  <h2>Leads to Update ({len(update_rows)})</h2>
-  <p class="muted">These would be updated in the CRM.</p>
-  {rows_table(update_rows)}
+  <h2>Leads to Update ({len(update_targets)})</h2>
+  <p class="muted">Every CRM person at a matched company; each would get the holding merged in. Nothing written yet.</p>
+  {targets_table(update_targets)}
 
   <h2>Leads to Check ({len(check_rows)})</h2>
   <p class="muted">New or ambiguous; review and handle manually.</p>
   {rows_table(check_rows)}
 </body></html>"""
+
+
+def fetch_company_people(jwt, company_name):
+    """Live-fetch every person whose company_name matches, across all pages.
+    Returns [{id, name, company_name, holdings}]. Read-only."""
+    out = []
+    page = 1
+    while page <= 50:
+        q = urllib.parse.quote(company_name)
+        req = urllib.request.Request(
+            f"{PIPELINE_BASE}/people.json?conditions[company_name]={q}&per_page=100&page={page}",
+            method="GET",
+            headers={"Authorization": f"Bearer {jwt}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+        for p in data.get("entries") or []:
+            cf = p.get("custom_fields") or {}
+            name = (p.get("full_name")
+                    or f"{p.get('first_name') or ''} {p.get('last_name') or ''}").strip()
+            out.append({
+                "id": p.get("id"),
+                "name": name,
+                "company_name": p.get("company_name"),
+                "holdings": list(cf.get(FIELD_PERSON_HOLDING) or []),
+            })
+        pag = data.get("pagination") or {}
+        if page >= (pag.get("pages") or 1):
+            break
+        page += 1
+    return out
 
 
 def run_pitchbook(s3, text, dry_run):
@@ -946,6 +989,23 @@ def run_pitchbook(s3, text, dry_run):
     angels   = [r for r in rows if r["kind"] == "angel"]
     firmonly = [r for r in rows if r["kind"] == "firm_only"]
 
+    # Real update targets: every CRM person at each matched company. The holding
+    # would be MERGED into each (never overwritten). Read-only here — no writes.
+    update_targets = []
+    if person_hid:
+        for _paste, crm_name, _cid in matched:
+            try:
+                people = fetch_company_people(jwt, crm_name)
+            except Exception as e:
+                update_targets.append({"name": "(query failed)", "company": crm_name,
+                                       "status": f"error: {type(e).__name__}"})
+                continue
+            for p in people:
+                already = person_hid in p["holdings"]
+                update_targets.append({
+                    "name": p["name"], "company": crm_name,
+                    "status": "already holds" if already else "will add holding"})
+
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
     run_log = {
         "ts":              datetime.now(timezone.utc).isoformat(),
@@ -960,8 +1020,9 @@ def run_pitchbook(s3, text, dry_run):
         "named":           len(named),
         "angels":          len(angels),
         "firm_only":       len(firmonly),
-        "firms_matched": matched,
-        "firms_manual":  manual,
+        "firms_matched":  matched,
+        "firms_manual":   manual,
+        "update_targets": len(update_targets),
     }
     try:
         s3.put_object(Bucket=BUCKET, Key=f"pitchbook-output/{ts}.json",
@@ -972,7 +1033,7 @@ def run_pitchbook(s3, text, dry_run):
 
     return render_pitchbook(security_raw, security, person_hid, company_hid,
                             sec_company_id, sec_company_name,
-                            named, angels, firmonly, matched, manual)
+                            named, angels, firmonly, matched, manual, update_targets)
 
 
 # --- Entry point -----------------------------------------------------------
