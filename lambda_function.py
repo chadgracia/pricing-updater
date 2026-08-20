@@ -158,6 +158,34 @@ def _safe_float(v):
     except (TypeError, ValueError):
         return None
 
+def _latest_date(*vals):
+    """Return the most recent YYYY-MM-DD among the given values, or None."""
+    best = None
+    for v in vals:
+        if not v:
+            continue
+        s = str(v)[:10]
+        try:
+            datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            continue
+        if best is None or s > best:
+            best = s
+    return best
+
+
+def _days_since_cell(prior_date):
+    if not prior_date:
+        return '<td class="num untouched">—</td>'
+    try:
+        d = datetime.strptime(prior_date, "%Y-%m-%d").date()
+    except ValueError:
+        return '<td class="num untouched">—</td>'
+    days = (datetime.now(timezone.utc).date() - d).days
+    label = "today" if days == 0 else f"{days}d"
+    return f'<td class="num">{label} <span class="muted">({prior_date})</span></td>'
+
+
 def load_crm_issuers(s3):
     """
     Read companies.json from S3, keep companies whose Org. Type contains
@@ -184,6 +212,11 @@ def load_crm_issuers(s3):
             "prior_bid": _safe_float(custom.get(FIELD_HIIVE_BID)),
             "prior_ask": _safe_float(custom.get(FIELD_HIIVE_ASK)),
             "prior_price": _safe_float(custom.get(FIELD_HIIVE_PRICE)),
+            "prior_date": _latest_date(
+                custom.get(FIELD_HIIVE_PRICE_DATE),
+                custom.get(FIELD_HIIVE_BID_DATE),
+                custom.get(FIELD_HIIVE_ASK_DATE),
+            ),
         })
     logger.info(f"companies.json has {len(companies)} records; {len(out)} match issuer filter")
     return out
@@ -567,6 +600,7 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
             f"{_delta_cell(crm['prior_bid'], rec['set_bid'])}"
             f"{_delta_cell(crm['prior_ask'], rec['set_ask'])}"
             f"{_delta_cell(crm.get('prior_price'), rec.get('set_price'))}"
+            f"{_days_since_cell(crm.get('prior_date'))}"
             f'<td class="num">{rec.get("bids", 0)}</td>'
             f'<td class="num">{crm["id"]}</td>'
             f'<td class="{"ok" if ok else "fail"}">'
@@ -575,7 +609,7 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
         )
     updates_table = (
         "<table><thead><tr><th>Company</th><th>Bid</th><th>Ask</th><th>Hiive Price</th>"
-        "<th># Bids</th><th>CRM ID</th><th>Status</th></tr></thead><tbody>"
+        "<th>Days since update</th><th># Bids</th><th>CRM ID</th><th>Status</th></tr></thead><tbody>"
         + "".join(rows) + "</tbody></table>"
     ) if updates else '<p class="muted">No matches.</p>'
 
