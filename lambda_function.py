@@ -164,7 +164,7 @@ def _latest_date(*vals):
     for v in vals:
         if not v:
             continue
-        s = str(v)[:10]
+        s = str(v)[:10].replace("/", "-")
         try:
             datetime.strptime(s, "%Y-%m-%d")
         except ValueError:
