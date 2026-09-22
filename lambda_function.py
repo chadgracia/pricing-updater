@@ -79,11 +79,11 @@ FIELD_HIIVE_PRICE      = "custom_label_3999575"
 FIELD_HIIVE_PRICE_DATE = "custom_label_3999576"
 
 # High Priority multi_select (company). This tool flags a company when Hiive shows
-# a hot book, and never touches a record a human has marked Hold.
+# a hot book. Pricing writes always proceed; existing checkbox selections
+# (including a leftover Hold) are preserved via the merge below, never cleared.
 FIELD_HIGH_PRIORITY = "custom_label_4002734"
 HP_SPV            = 7190470   # "Source SPV Seller"
 HP_DIRECT         = 7190471   # "Source Direct Seller"
-HP_HOLD           = 7190472   # "Hold" — when present, this tool skips the record entirely
 HP_BIDS_THRESHOLD = 10        # Hiive bid count at/above which a company is flagged hot
 
 ISSUER_ORG_TYPE_IDS = {5103523, 6677589}  # Unicorn, Private Company
@@ -307,6 +307,70 @@ def parse_hiive_blocks(raw):
         i = j
     logger.info(f"PARSER_V2 parsed {len(out)} blocks: " + ", ".join(f"{r['name']}={r['bids']}" for r in out))
     return out
+# --- Clarity (formerly Hiive) companies-page parser ------------------------
+# Hiive rebranded as Clarity (Sep 2026). The companies list no longer shows
+# bid/ask/bid counts; each row is:
+#     <Name> logo / <Name> / <description> / <Clarity Price> / <6M return %> /
+#     <6M matches> / <total matches>
+# Only the Clarity Price is written (into the existing Hiive Price field).
+# Bid/Ask fields are never touched in this mode.
+
+CLARITY_PRICE_RE = re.compile(r"^\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+$")  # always has decimals
+CLARITY_PCT_RE   = re.compile(r"^[+\-−]?\d[\d,]*(?:\.\d+)?%$")
+CLARITY_INT_RE   = re.compile(r"^\d[\d,]*$")
+
+def is_clarity_paste(text):
+    return "Clarity Price" in text
+
+def parse_clarity_rows(raw):
+    """Returns list of records from the Clarity companies-page copy/paste."""
+    lines = [l.strip() for l in raw.split("\n")]
+    out = []
+    i = 0
+    while i < len(lines):
+        if not lines[i].endswith(" logo"):
+            i += 1
+            continue
+        logo_name = lines[i][:-len(" logo")].strip()
+        j = i + 1
+        while j < len(lines) and not lines[j]:
+            j += 1
+        if j < len(lines) and not lines[j].endswith(" logo"):
+            name, k = lines[j], j + 1
+        else:
+            name, k = logo_name, j
+        cells = []
+        while k < len(lines) and not lines[k].endswith(" logo"):
+            if lines[k]:
+                cells.append(lines[k])
+            k += 1
+        price, pct, ints = None, None, []
+        for c in cells:
+            if price is None:
+                if c in ("—", "-", "--", "N/A"):
+                    break  # no Clarity Price shown for this company
+                if CLARITY_PRICE_RE.match(c):
+                    v = float(c.lstrip("$").replace(",", ""))
+                    price = v if v > 0 else None
+                    if price is None:
+                        break
+                continue  # description line(s) before the price
+            if pct is None and CLARITY_PCT_RE.match(c):
+                pct = c
+                continue
+            if CLARITY_INT_RE.match(c):
+                ints.append(int(c.replace(",", "")))
+        rec = _empty_rec(name or logo_name, source="clarity")
+        rec["set_price"]     = price
+        rec["return_6m"]     = pct
+        rec["matches_6m"]    = ints[0] if len(ints) > 0 else None
+        rec["matches_total"] = ints[1] if len(ints) > 1 else None
+        out.append(rec)
+        i = k
+    logger.info(f"CLARITY parsed {len(out)} rows: " +
+                ", ".join(f"{r['name']}={r['set_price']}" for r in out))
+    return out
+
 # --- One-liner parser ------------------------------------------------------
 
 ONELINER = re.compile(
@@ -460,14 +524,12 @@ def update_company(jwt, company_id, rec, date_str, dry_run):
     if not payload and not flag_hot:
         return True, "nothing to write"
 
-    # Read current High Priority live so we can honor Hold and merge the
-    # Source checkboxes without clobbering an existing selection.
+    # Read current High Priority live so we can merge the Source checkboxes
+    # without clobbering an existing selection.
     try:
         current_hp = get_high_priority(jwt, company_id)
     except Exception as e:
         return False, f"high-priority read failed: {type(e).__name__}: {e}"
-    if HP_HOLD in current_hp:
-        return True, "held — not touched"
 
     status_note = None
     if flag_hot:
@@ -543,6 +605,10 @@ def render_form():
   <h1>Market Price Updater</h1>
   <p class="muted">First line must be your access code. Below that, paste a data dump
      OR one-liners like <code>zipline bid $100</code> (not both in the same paste).</p>
+  <p class="muted">Clarity (formerly Hiive) companies page: copy the list and paste it —
+     only the Clarity Price is written, into the Hiive Price field. Put the word
+     <code>preview</code> on the line right after the access code to see results
+     with no CRM writes.</p>
   <form method="POST" action="">
     <textarea name="hiive_text" autofocus required></textarea>
     <br><button type="submit">Update CRM</button>
@@ -1089,27 +1155,45 @@ def lambda_handler(event, context):
     if not auth_ok:
         return html_response(403, render_error("Unauthorized"))
 
+    # Optional per-run preview: the word "preview" on the first line after the
+    # access code forces a dry run for this request only (no Pipeline writes).
+    dry = DRY_RUN
+    _lines = text.split("\n")
+    for _i, _ln in enumerate(_lines):
+        if not _ln.strip():
+            continue
+        if _ln.strip().lower() == "preview":
+            dry = True
+            text = "\n".join(_lines[_i + 1:])
+        break
+
     s3 = boto3.client("s3")
     try:
-        # Mode detection: the two formats are never mixed in one paste.
-        # Hiive dashboard copies always contain the word "hiive" (markdown links
+        # Mode detection: the formats are never mixed in one paste.
+        # Clarity (formerly Hiive) companies page has a "Clarity Price" header.
+        # Old Hiive dashboard copies always contain the word "hiive" (markdown links
         # to app.hiive.com, "Hiive Price" label, etc.). One-liners don't.
         is_hiive_mode = "hiive" in text.lower()
-        if is_hiive_mode:
+        if is_clarity_paste(text):
+            hiive_recs    = parse_clarity_rows(text)
+            oneliner_recs = []
+        elif is_hiive_mode:
             hiive_recs    = parse_hiive_blocks(text)
             oneliner_recs = []
         elif is_pitchbook_table(text):
-            return html_response(200, run_pitchbook(s3, text, DRY_RUN))
+            return html_response(200, run_pitchbook(s3, text, dry))
         else:
             hiive_recs    = []
             oneliner_recs = parse_one_liners(text)
 
-        # Skip records with no data (truncated Hiive blocks)
+        # Skip records with no data (truncated Hiive blocks / no Clarity Price)
         all_recs = hiive_recs + oneliner_recs
         skipped_empty = [r["name"] for r in all_recs
-                         if r["set_bid"] is None and r["set_ask"] is None]
+                         if r["set_bid"] is None and r["set_ask"] is None
+                         and r.get("set_price") is None]
         all_recs = [r for r in all_recs
-                    if r["set_bid"] is not None or r["set_ask"] is not None]
+                    if r["set_bid"] is not None or r["set_ask"] is not None
+                    or r.get("set_price") is not None]
 
         if not all_recs:
             return html_response(200, render_error(
@@ -1129,7 +1213,7 @@ def lambda_handler(event, context):
         jwt = get_jwt(s3)
         results = []
         for rec, crm_co, _lvl in updates:
-            ok, err = update_company(jwt, crm_co["id"], rec, today, DRY_RUN)
+            ok, err = update_company(jwt, crm_co["id"], rec, today, dry)
             results.append((ok, err))
             if not ok:
                 logger.warning(f"Update failed for {crm_co['name']} ({crm_co['id']}): {err}")
@@ -1138,7 +1222,7 @@ def lambda_handler(event, context):
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
         run_log = {
             "ts":              datetime.now(timezone.utc).isoformat(),
-            "dry_run":         DRY_RUN,
+            "dry_run":         dry,
             "parsed_hiive":    len(hiive_recs),
             "parsed_oneliner": len(oneliner_recs),
             "updates":         len(updates),
@@ -1167,7 +1251,7 @@ def lambda_handler(event, context):
             updates, results, unmatched, ambiguous, skipped_empty,
             parsed_hiive=len(hiive_recs),
             parsed_oneliners=len(oneliner_recs),
-            dry_run=DRY_RUN,
+            dry_run=dry,
         ))
 
     except Exception as e:
