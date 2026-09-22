@@ -371,6 +371,58 @@ def parse_clarity_rows(raw):
                 ", ".join(f"{r['name']}={r['set_price']}" for r in out))
     return out
 
+# --- Clarity company-screener parser (Companies -> Company screener) --------
+# Richer than the Direct-markets list: has Highest bid / Lowest Ask per row.
+# Non-blank lines per row (default columns):
+#     <Name> / <description> / <Clarity Price> / <Highest bid> / <Lowest Ask> /
+#     <6M change %> / <round amount> / <round PPS>
+# "-" in bid/ask = none shown -> "CLEAR" (existing CRM value + date kept, no write).
+# Rows are found by pattern (name, desc, decimal price, price-or-dash x2), so
+# nav text, pagination and footer are ignored and several pages can be pasted
+# together.
+
+CLARITY_DASHES = ("-", "—", "–", "--", "N/A")
+
+def is_clarity_screener(text):
+    return any(l.strip().lower() == "highest bid" for l in text.split("\n"))
+
+def _cl_price_or_dash(s):
+    return s in CLARITY_DASHES or bool(CLARITY_PRICE_RE.match(s))
+
+def _cl_is_value(s):
+    return (s in CLARITY_DASHES or bool(CLARITY_PRICE_RE.match(s))
+            or bool(CLARITY_PCT_RE.match(s)) or bool(CLARITY_INT_RE.match(s)))
+
+def parse_clarity_screener(raw):
+    """Returns list of records from the Clarity company-screener copy/paste."""
+    lines = [l.strip() for l in raw.split("\n") if l.strip()]
+    def val(s):
+        if s in CLARITY_DASHES:
+            return "CLEAR"
+        v = float(s.lstrip("$").replace(",", ""))
+        return v if v > 0 else "CLEAR"
+    out, seen = [], set()
+    i = 0
+    while i + 4 < len(lines):
+        name, price, bid, ask = lines[i], lines[i + 2], lines[i + 3], lines[i + 4]
+        if (not _cl_is_value(name) and not _cl_is_value(lines[i + 1])
+                and CLARITY_PRICE_RE.match(price)
+                and _cl_price_or_dash(bid) and _cl_price_or_dash(ask)):
+            if name.lower() not in seen:
+                seen.add(name.lower())
+                rec = _empty_rec(name, source="clarity")
+                p = val(price)
+                rec["set_price"] = p if isinstance(p, float) else None
+                rec["set_bid"]   = val(bid)
+                rec["set_ask"]   = val(ask)
+                out.append(rec)
+            i += 5
+            continue
+        i += 1
+    logger.info(f"CLARITY_SCREENER parsed {len(out)} rows: " +
+                ", ".join(f"{r['name']}={r['set_price']}/{r['set_bid']}/{r['set_ask']}" for r in out))
+    return out
+
 # --- One-liner parser ------------------------------------------------------
 
 ONELINER = re.compile(
@@ -605,8 +657,9 @@ def render_form():
   <h1>Market Price Updater</h1>
   <p class="muted">First line must be your access code. Below that, paste a data dump
      OR one-liners like <code>zipline bid $100</code> (not both in the same paste).</p>
-  <p class="muted">Clarity (formerly Hiive) companies page: copy the list and paste it —
-     only the Clarity Price is written, into the Hiive Price field. Put the word
+  <p class="muted">Clarity (formerly Hiive): paste the Company screener / Watchlist
+     (writes Clarity Price, Highest bid, Lowest Ask; several pages can be pasted
+     together) or the Direct markets list (Clarity Price only). Put the word
      <code>preview</code> on the line right after the access code to see results
      with no CRM writes.</p>
   <form method="POST" action="">
@@ -1175,7 +1228,8 @@ def lambda_handler(event, context):
         # to app.hiive.com, "Hiive Price" label, etc.). One-liners don't.
         is_hiive_mode = "hiive" in text.lower()
         if is_clarity_paste(text):
-            hiive_recs    = parse_clarity_rows(text)
+            hiive_recs    = (parse_clarity_screener(text) if is_clarity_screener(text)
+                             else parse_clarity_rows(text))
             oneliner_recs = []
         elif is_hiive_mode:
             hiive_recs    = parse_hiive_blocks(text)
