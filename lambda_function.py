@@ -652,7 +652,7 @@ code { background: #f1f1f1; padding: 1px 5px; border-radius: 3px; font-size: 12p
 
 def render_form():
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Market Price Updater</title><style>{CSS}</style></head>
+<html><head><meta charset="utf-8"><link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💲</text></svg>"><title>Market Price Updater</title><style>{CSS}</style></head>
 <body>
   <h1>Market Price Updater</h1>
   <p class="muted">First line must be your access code. Below that, paste a data dump
@@ -774,7 +774,7 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
         amb_block += "</ul>"
 
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Market Price Updater · Results</title><style>{CSS}</style></head>
+<html><head><meta charset="utf-8"><link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💲</text></svg>"><title>Market Price Updater · Results</title><style>{CSS}</style></head>
 <body>
   <h1>Market Price Updater — Results</h1>
   {banner}
@@ -799,7 +799,7 @@ def render_results(updates, results, unmatched, ambiguous, skipped_empty,
 
 def render_error(msg):
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><style>{CSS}</style></head>
+<html><head><meta charset="utf-8"><link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💲</text></svg>"><style>{CSS}</style></head>
 <body>
   <h1>Market Price Updater</h1>
   <div class="banner err">{html.escape(msg)}</div>
@@ -1055,7 +1055,7 @@ def render_pitchbook(security_raw, security, person_hid, company_hid,
 
     total = len(named) + len(angels) + len(firmonly)
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>Market Price Updater · Pitchbook</title><style>{CSS}</style></head>
+<html><head><meta charset="utf-8"><link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💲</text></svg>"><title>Market Price Updater · Pitchbook</title><style>{CSS}</style></head>
 <body>
   <h1>Pitchbook Import — Preview</h1>
   <div class="banner dry">PREVIEW — no writes. Lists every CRM person at each matched company who would get the holding merged in.</div>
